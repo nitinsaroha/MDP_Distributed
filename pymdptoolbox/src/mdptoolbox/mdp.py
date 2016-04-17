@@ -263,7 +263,7 @@ class MDP(object):
         # for aa in range(self.A):
         #     Q[aa] = self.R[aa] + self.discount * self.P[aa].dot(V)
         for ss in xrange(self.S):
-            Q[ss] = _np.transpose(_np.array(self.R))[ss] + 0.96 * self.myfunc(ss)
+            Q[ss] = _np.array(self.R)[:,ss] + 0.96 * self.myfunc(ss)
         # Get the policy and value, for now it is being returned but...
         # Which way is better?
         # 1. Return, (policy, value)
