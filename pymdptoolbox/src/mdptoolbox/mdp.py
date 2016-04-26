@@ -1,3 +1,6 @@
+# hello.py
+
+
 # -*- coding: utf-8 -*-
 """Markov Decision Process (MDP) Toolbox: ``mdp`` module
 =====================================================
@@ -62,6 +65,10 @@ import numpy as _np
 import scipy.sparse as _sp
 
 import mdptoolbox.util as _util
+from mpi4py import MPI
+comm = MPI.COMM_WORLD
+rank = comm.Get_rank()
+size = comm.Get_size()
 
 _MSG_STOP_MAX_ITER = "Iterating stopped due to maximum number of iterations " \
     "condition."
@@ -216,6 +223,7 @@ class MDP(object):
         self.S, self.A = _computeDimensions(transitions)
         self.P = self._computeTransition(transitions)
         self.R = self._computeReward(reward, transitions)
+        
 
         # the verbosity is by default turned off
         self.verbose = True
@@ -236,6 +244,51 @@ class MDP(object):
             R_repr += repr(self.R[aa]) + "\n"
         return(P_repr + "\n" + R_repr)
 
+    def _bellmanOperator_mpi(self, a, b, ln, V=None):
+        # Apply the Bellman operator on the value function.
+        #
+        # Updates the value function and the Vprev-improving policy.
+        #
+        # Returns: (policy, value), tuple of new policy and its value
+        #
+        # If V hasn't been sent into the method, then we assume to be working
+        # on the objects V attribute
+        # print (a, b, ln)
+        print (rank)
+        if V is None:
+            # this V should be a reference to the data rather than a copy
+            V = self.V
+        else:
+            # make sure the user supplied V is of the right shape
+            try:
+                assert V.shape in ((ln,), (1, ln)), "V is not the " \
+                    "right shape (Bellman operator)."
+            except AttributeError:
+                raise TypeError("V must be a numpy array or matrix.")
+        # Looping through each action the the Q-value matrix is calculated.
+        # P and V can be any object that supports indexing, so it is important
+        # that you know they define a valid MDP before calling the
+        # _bellmanOperator method. Otherwise the results will be meaningless.
+        Q = _np.empty((ln, self.A))
+        for ss in xrange(ln):
+            Q[ss] = _np.array(self.R)[:,ss] + 0.96 * self.myfunc_mpi(ss, ln)
+        # Get the policy and value, for now it is being returned but...
+        # Which way is better?
+        # 1. Return, (policy, value)
+        # print ('Size of Q is: ' + str(Q.shape))
+        return (Q.argmax(axis=1), Q.max(axis=1))
+        # 2. update self.policy and self.V directly
+        # self.V = Q.max(axis=1)
+        # self.policy = Q.argmax(axis=1)
+
+    def myfunc_mpi(self, ss, ln):
+        arr = []
+        new_p = _np.transpose(_np.array(self.P)[:,[ss][:]].reshape(self.A, ln))
+        for i in xrange(self.A):
+            arr.append(new_p[:,i].dot(self.V))
+        arr = _np.array(arr).reshape(1, len(arr))
+        return arr
+
     def _bellmanOperator(self, V=None):
         # Apply the Bellman operator on the value function.
         #
@@ -251,7 +304,7 @@ class MDP(object):
         else:
             # make sure the user supplied V is of the right shape
             try:
-                assert V.shape in ((self.S,), (1, self.S)), "V is not the " \
+                assert V.shape in ((self.q,), (1, self.S)), "V is not the " \
                     "right shape (Bellman operator)."
             except AttributeError:
                 raise TypeError("V must be a numpy array or matrix.")
@@ -1432,6 +1485,16 @@ class ValueIteration(MDP):
     def run(self):
         # Run the value iteration algorithm.
         self._startRun()
+        a = 0
+
+        local_n = self.S / size
+        local_a = a + rank * local_n
+        local_b = local_a + local_n
+        local_V = _np.zeros(self.S)
+        local_P = _np.zeros(self.S)
+        global_V =_np.zeros(self.S)
+        global_P =_np.zeros(self.S)
+
 
         while True:
             self.iter += 1
@@ -1439,7 +1502,20 @@ class ValueIteration(MDP):
             Vprev = self.V.copy()
 
             # Bellman Operator: compute policy and value functions
-            self.policy, self.V = self._bellmanOperator()
+            local_P, local_V = self._bellmanOperator_mpi(local_a, local_b, local_n)
+            if rank == 0:
+                global_V[:self.S] = local_V
+                global_P[:self.S] = local_P
+                for i in xrange(1, size):
+                    comm.Recv([local_V, local_P, local_a, local_b], source = MPI.ANY_SOURCE)
+                    global_V[local_a: local_b] = local_V
+                    global_P[local_a: local_b] = local_P
+                # print (repr(local_V) + "\n" + repr(local_P))
+                self.V = global_V
+                self.policy = global_P
+            else:
+                comm.send([local_V, local_a, local_b], dest = 0)
+
 
             # The values, based on Q. For the function "max()": the option
             # "axis" means the axis along which to operate. In this case it
