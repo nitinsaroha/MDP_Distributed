@@ -1,6 +1,6 @@
 # hello.py
 
-
+# -*- coding: utf-8 -*-
 # -*- coding: utf-8 -*-
 """Markov Decision Process (MDP) Toolbox: ``mdp`` module
 =====================================================
@@ -65,11 +65,11 @@ import numpy as _np
 import scipy.sparse as _sp
 
 import mdptoolbox.util as _util
+
 from mpi4py import MPI
 comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
 size = comm.Get_size()
-
 _MSG_STOP_MAX_ITER = "Iterating stopped due to maximum number of iterations " \
     "condition."
 _MSG_STOP_EPSILON_OPTIMAL_POLICY = "Iterating stopped, epsilon-optimal " \
@@ -101,7 +101,7 @@ def _printVerbosity(iteration, variation):
 
 
 class MDP(object):
-
+    
     """A Markov Decision Problem.
 
     Let ``S`` = the number of states, and ``A`` = the number of acions.
@@ -276,7 +276,8 @@ class MDP(object):
         # Which way is better?
         # 1. Return, (policy, value)
         # print ('Size of Q is: ' + str(Q.shape))
-        return (Q.argmax(axis=1), Q.max(axis=1))
+        return Q
+        #return (Q.argmax(axis=1), Q.max(axis=1))
         # 2. update self.policy and self.V directly
         # self.V = Q.max(axis=1)
         # self.policy = Q.argmax(axis=1)
@@ -1410,8 +1411,7 @@ class ValueIteration(MDP):
     (1, 0)
 
     """
-
-    def __init__(self, transitions, reward, discount, epsilon=0.01,
+     def __init__(self, transitions, reward, discount, epsilon=0.01,
                  max_iter=1000, initial_value=0, skip_check=False):
         # Initialise a value iteration MDP.
 
@@ -1481,41 +1481,51 @@ class ValueIteration(MDP):
         # self.V = Vprev
 
         self.max_iter = int(_math.ceil(max_iter))
+    def get_range(self,rank, s):
+        local_n = s / size
+        local_a = rank * local_n
+        local_b = local_a + local_n
+        return (local_a, local_b)
 
     def run(self):
         # Run the value iteration algorithm.
         self._startRun()
-        a = 0
-
         local_n = self.S / size
-        local_a = a + rank * local_n
-        local_b = local_a + local_n
+        takeQ = _np.empty((local_n,self.A))
         local_V = _np.zeros(self.S)
         local_P = _np.zeros(self.S)
         global_V =_np.zeros(self.S)
         global_P =_np.zeros(self.S)
-
+        newrank = -1
 
         while True:
             self.iter += 1
-
+            local_a,local_b = self.get_range(rank,self.S)
             Vprev = self.V.copy()
 
             # Bellman Operator: compute policy and value functions
-            local_P, local_V = self._bellmanOperator_mpi(local_a, local_b, local_n)
+            takeQ = self._bellmanOperator_mpi(local_a, local_b, local_n)
             if rank == 0:
-                global_V[:self.S] = local_V
-                global_P[:self.S] = local_P
+                local_P = takeQ.argmax(axis=1)
+                local_V = takeQ.max(axis=1)
+                global_V[local_a:local_b] = local_V
+                global_P[local_a:local_b] = local_P
                 for i in xrange(1, size):
-                    comm.Recv([local_V, local_P, local_a, local_b], source = MPI.ANY_SOURCE)
-                    global_V[local_a: local_b] = local_V
-                    global_P[local_a: local_b] = local_P
+                    status = MPI.Status()
+                    comm.Recv(takeQ, source = MPI.ANY_SOURCE, tag = MPI.ANY_TAG, status=status)
+                    newrank = status.Get_source()
+                    la,lb = self.get_range(newrank,self.S)
+                    local_P = takeQ.argmax(axis=1)
+                    local_V = takeQ.max(axis=1)
+                    global_V[la : lb] = local_V
+                    global_P[la : lb] = local_P
                 # print (repr(local_V) + "\n" + repr(local_P))
                 self.V = global_V
                 self.policy = global_P
             else:
-                comm.send([local_V, local_a, local_b], dest = 0)
-
+                comm.send(takeQ, dest = 0, tag=rank)
+            comm.Bcast(self.V,root=0)
+            comm.Bcast(self.policy, root=0)
 
             # The values, based on Q. For the function "max()": the option
             # "axis" means the axis along which to operate. In this case it
